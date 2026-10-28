@@ -58,7 +58,13 @@ export class BrowserModel {
 
   private readonly onActivations?: (frame: ActivationFrame) => void
 
-  constructor(onActivations?: (frame: ActivationFrame) => void) {
+  private readonly onMask?: (disabled: Uint32Array) => void
+
+  constructor(
+    onActivations?: (frame: ActivationFrame) => void,
+    onMask?: (disabled: Uint32Array) => void,
+  ) {
+    this.onMask = onMask
     this.onActivations = onActivations
     this.criteria.push(this.stop)
   }
@@ -153,6 +159,12 @@ export class BrowserModel {
         CHANNELS,
         neurons.filter((n) => n.layer === layer).map((n) => n.channel),
       )
+    }
+    if (this.onMask) {
+      const disabled = new Uint32Array(LAYERS * CHANNELS)
+      for (const neuron of neurons)
+        disabled[neuron.layer * CHANNELS + neuron.channel] = 1
+      this.onMask(disabled)
     }
   }
 
@@ -299,60 +311,68 @@ export class BrowserModel {
   async analyze(
     concept: string,
     status: (text: string) => void,
+    providedControls?: string[],
   ): Promise<Report> {
     this.stop.reset()
     this.setMask([])
     let controls: string[] = [],
       controlGeneration = ''
     try {
-      status('Generating related control words…')
-      for (let attempt = 0; attempt < 2; attempt++) {
-        this.checkStop()
-        const text = this.tokenizer.apply_chat_template(
-          [
-            {
-              role: 'user',
-              content: `For the concept ${JSON.stringify(concept)}, choose exactly three related but distinct contrast concepts. Choose concrete sibling alternatives at the SAME level of specificity. Examples: apple -> ["pear", "peach", "banana"]; violin -> ["cello", "flute", "trumpet"]; wolf -> ["fox", "dog", "coyote"]. For a specific animal, choose three other specific animals. Never use umbrella categories such as "predator", "mammal", or "domestic animal". Never use synonyms (for example cat/feline), translations, attributes, subtypes, or singular/plural variants. Prefer single words for a single-word target. Return ONLY a JSON array of three short strings.${attempt ? ' The previous response was invalid; follow the JSON format exactly.' : ''}`,
-            },
-          ],
-          {
-            tokenize: false,
-            add_generation_prompt: true,
-            ...{ enable_thinking: false },
-          },
-        )
-        const ids = this.tokenizer.encode(text, { add_special_tokens: false }),
-          inputs = this.inputs(ids)
-        try {
-          const output = await this.model.generate({
-            ...inputs,
-            max_new_tokens: 128,
-            do_sample: false,
-            stopping_criteria: this.criteria,
-          })
-          if (!(output instanceof Tensor))
-            throw new Error('Unexpected control-generation output')
-          try {
-            controlGeneration = this.tokenizer.decode(
-              Array.from(output.data as BigInt64Array).slice(ids.length),
-              { skip_special_tokens: true },
-            )
-          } finally {
-            output.dispose()
-          }
+      if (providedControls) {
+        controls = parseControls(JSON.stringify(providedControls), concept)
+        controlGeneration = JSON.stringify(controls)
+      } else {
+        status('Generating related control words…')
+        for (let attempt = 0; attempt < 2; attempt++) {
           this.checkStop()
+          const text = this.tokenizer.apply_chat_template(
+            [
+              {
+                role: 'user',
+                content: `For the concept ${JSON.stringify(concept)}, choose exactly three related but distinct contrast concepts. Choose concrete sibling alternatives at the SAME level of specificity. Examples: apple -> ["pear", "peach", "banana"]; violin -> ["cello", "flute", "trumpet"]; wolf -> ["fox", "dog", "coyote"]. For a specific animal, choose three other specific animals. Never use umbrella categories such as "predator", "mammal", or "domestic animal". Never use synonyms (for example cat/feline), translations, attributes, subtypes, or singular/plural variants. Prefer single words for a single-word target. Return ONLY a JSON array of three short strings.${attempt ? ' The previous response was invalid; follow the JSON format exactly.' : ''}`,
+              },
+            ],
+            {
+              tokenize: false,
+              add_generation_prompt: true,
+              ...{ enable_thinking: false },
+            },
+          )
+          const ids = this.tokenizer.encode(text, {
+              add_special_tokens: false,
+            }),
+            inputs = this.inputs(ids)
           try {
-            controls = parseControls(controlGeneration, concept)
-            break
-          } catch (error) {
-            if (attempt === 1)
-              throw new Error(
-                `Could not generate valid controls: ${error instanceof Error ? error.message : String(error)}`,
+            const output = await this.model.generate({
+              ...inputs,
+              max_new_tokens: 128,
+              do_sample: false,
+              stopping_criteria: this.criteria,
+            })
+            if (!(output instanceof Tensor))
+              throw new Error('Unexpected control-generation output')
+            try {
+              controlGeneration = this.tokenizer.decode(
+                Array.from(output.data as BigInt64Array).slice(ids.length),
+                { skip_special_tokens: true },
               )
+            } finally {
+              output.dispose()
+            }
+            this.checkStop()
+            try {
+              controls = parseControls(controlGeneration, concept)
+              break
+            } catch (error) {
+              if (attempt === 1)
+                throw new Error(
+                  `Could not generate valid controls: ${error instanceof Error ? error.message : String(error)}`,
+                )
+            }
+          } finally {
+            inputs.input_ids.dispose()
+            inputs.attention_mask.dispose()
           }
-        } finally {
-          inputs.input_ids.dispose()
-          inputs.attention_mask.dispose()
         }
       }
       const targets: Float32Array[] = [],
@@ -383,6 +403,7 @@ export class BrowserModel {
         concept,
         controls,
         controlGeneration,
+        controlSource: providedControls ? 'provided' : 'generated',
         statistics,
         candidates: ranked,
         probes: PROFILE_TEMPLATES.flatMap((t) =>

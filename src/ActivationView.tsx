@@ -5,9 +5,11 @@ import { createRenderer } from './visualization/renderer'
 
 export function ActivationView({
   frame,
+  disabled,
   busy,
 }: {
   frame: RefObject<ActivationFrame | null>
+  disabled: RefObject<Uint32Array | null>
   busy: boolean
 }) {
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -24,12 +26,14 @@ export function ActivationView({
   const [error, setError] = useState('')
   const [ready, setReady] = useState(false)
   const [sample, setSample] = useState<ActivationFrame | null>(null)
+  const [mask, setMask] = useState<Uint32Array | null>(null)
   const drag = useRef<{ x: number; y: number } | null>(null)
   useEffect(() => {
     let disposed = false
     let animation = 0
     let renderer: Awaited<ReturnType<typeof createRenderer>> | undefined
     let previous: ActivationFrame | null | undefined
+    let previousMask: Uint32Array | null | undefined
     let failed = false
     const fail = (message: string) => {
       failed = true
@@ -53,6 +57,12 @@ export function ActivationView({
                 previous?.values ?? new Float32Array(LAYERS * CHANNELS),
               )
             }
+            if (disabled.current !== previousMask) {
+              previousMask = disabled.current
+              renderer!.uploadMask(
+                previousMask ?? new Uint32Array(LAYERS * CHANNELS),
+              )
+            }
             const c = camera.current
             renderer!.draw(c.yaw, c.pitch, c.distance, c.layer, c.gain)
             animation = requestAnimationFrame(draw)
@@ -64,7 +74,10 @@ export function ActivationView({
       })
       .catch((e: unknown) => fail(e instanceof Error ? e.message : String(e)))
     // Text updates are independent of the full-rate GPU uploads.
-    const timer = window.setInterval(() => setSample(frame.current), 200)
+    const timer = window.setInterval(() => {
+      setSample(frame.current)
+      setMask(disabled.current)
+    }, 200)
     const element = canvas.current!
     const wheel = (event: WheelEvent) => {
       event.preventDefault()
@@ -82,7 +95,7 @@ export function ActivationView({
       element.removeEventListener('wheel', wheel)
       renderer?.dispose()
     }
-  }, [frame])
+  }, [frame, disabled])
   return (
     <section
       className="activation-view"
@@ -197,7 +210,8 @@ export function ActivationView({
       </div>
       <p className="activation-key">
         <span />
-        Low → high magnitude · Drag to orbit · Scroll to zoom
+        Low → high magnitude · <i className="masked-key" /> Red = masked · Drag
+        to orbit · Scroll to zoom
       </p>
       <p className="status">
         Each point is one MLP channel, ordered by channel index within each
@@ -229,9 +243,11 @@ export function ActivationView({
           />{' '}
           <output>
             Layer {layer}, channel {channel}:{' '}
-            {sample
-              ? sample.values[layer * CHANNELS + channel].toPrecision(5)
-              : 'no measurement'}
+            {mask?.[layer * CHANNELS + channel]
+              ? '0 (masked)'
+              : sample
+                ? sample.values[layer * CHANNELS + channel].toPrecision(5)
+                : 'no measurement'}
           </output>
         </label>
       )}

@@ -2,9 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Message, Reply, Request, Report } from './inference/protocol'
-import { PROFILE_TEMPLATES, TEST_TEMPLATES } from './inference/probes'
+import {
+  PROFILE_TEMPLATES,
+  TEST_TEMPLATES,
+  parseControls,
+} from './inference/probes'
 import { aboveThreshold, isQualified } from './inference/statistics'
-import type { Trial } from './inference/protocol'
+import type { Trial, CachedAnalysisOption } from './inference/protocol'
 import './App.css'
 import { ActivationView } from './ActivationView'
 import type { ActivationFrame } from './inference/protocol'
@@ -12,11 +16,18 @@ import type { ActivationFrame } from './inference/protocol'
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
+  const [cachedAnalyses, setCachedAnalyses] = useState<CachedAnalysisOption[]>(
+    [],
+  )
   const [concept, setConcept] = useState('')
+  const [controlWords, setControlWords] = useState('')
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [report, setReport] = useState<Report | null>(null)
+  const [cacheInfo, setCacheInfo] = useState<
+    Extract<Reply, { type: 'report' }>['cache'] | null
+  >(null)
   const [applied, setApplied] = useState<{
     threshold: number
     count: number
@@ -36,6 +47,7 @@ export default function App() {
     [selected],
   )
   const maximum = report?.candidates[0]?.score ?? 1
+  const disabledNeurons = useRef<Uint32Array | null>(null)
   const activationFrame = useRef<ActivationFrame | null>(null)
   const worker = useRef<Worker | null>(null)
   const locked = useRef(false)
@@ -51,9 +63,12 @@ export default function App() {
     setBusy(false)
     setStatus('')
     setApplied(null)
+    disabledNeurons.current = null
+    dispatch({ type: 'list-analyses' })
     return () => {
       worker.current?.terminate()
       worker.current = null
+      disabledNeurons.current = null
     }
   }, [])
   useEffect(() => {
@@ -77,6 +92,8 @@ export default function App() {
         type: 'module',
       })
       worker.current.onmessage = ({ data }: MessageEvent<Reply>) => {
+        if (data.type === 'mask-state') disabledNeurons.current = data.disabled
+        if (data.type === 'analyses') setCachedAnalyses(data.entries)
         if (data.type === 'activations') {
           activationFrame.current = data.frame
           return
@@ -102,6 +119,7 @@ export default function App() {
           })
         if (data.type === 'report') {
           setReport(data.report)
+          setCacheInfo(data.cache)
           setThreshold(1)
           setEvaluation(null)
         }
@@ -129,6 +147,7 @@ export default function App() {
         setError(event.message || 'The model worker failed. Try again.')
         worker.current?.terminate()
         worker.current = null
+        disabledNeurons.current = null
         ready.current = false
         locked.current = false
         setBusy(false)
@@ -154,6 +173,7 @@ export default function App() {
     if (!ready.current) {
       worker.current?.terminate()
       worker.current = null
+      disabledNeurons.current = null
       locked.current = false
       setBusy(false)
       setStatus('')
@@ -187,6 +207,7 @@ export default function App() {
               revision: 'ca652ef636e8b121ff4a1607c37ab578cb866987',
               method: `Generated related controls; ${report.statistics.pairs} paired prompt-only activation profiles; relatedness = paired effect size times consistency; all positive scores retained without a channel cap; optional separate continuation-loss test. Exploratory statistics, not proof of concept erasure.`,
               ...report,
+              analysisCache: cacheInfo,
               threshold,
               selected,
               applied,
@@ -211,16 +232,63 @@ export default function App() {
   return (
     <main className="workspace">
       <section className="chat" aria-label="Inference">
+        <select
+          className="cached-analyses"
+          aria-label="Cached analyses"
+          value=""
+          disabled={busy || !cachedAnalyses.length}
+          onChange={(e) => {
+            const entry = cachedAnalyses[Number(e.target.value)]
+            if (!entry || locked.current) return
+            setConcept(entry.concept)
+            const controls =
+              entry.controlSource === 'provided' ? entry.controls : undefined
+            setControlWords(controls?.join(', ') ?? '')
+            setReport(null)
+            setEvaluation(null)
+            setApplied(null)
+            setMessages([])
+            dispatch({
+              type: 'analyze',
+              concept: entry.concept,
+              controls,
+              cachedOnly: true,
+            })
+          }}
+        >
+          <option value="" disabled>
+            {cachedAnalyses.length
+              ? 'Open cached analysis…'
+              : 'No cached analyses'}
+          </option>
+          {cachedAnalyses.map((entry, i) => (
+            <option key={i} value={i}>
+              {entry.concept} · {entry.controls.join(', ')}
+              {entry.controlSource === 'generated' ? ' (auto)' : ''}
+            </option>
+          ))}
+        </select>
         <form
           className="concept"
           onSubmit={(e) => {
             e.preventDefault()
             if (!concept.trim() || locked.current) return
+            let controls: string[] | undefined
+            try {
+              if (controlWords.trim())
+                controls = parseControls(
+                  JSON.stringify(controlWords.split(',').map((s) => s.trim())),
+                  concept.trim(),
+                )
+            } catch (error) {
+              setError(error instanceof Error ? error.message : String(error))
+              return
+            }
             setReport(null)
             setEvaluation(null)
             setApplied(null)
             setMessages([])
-            dispatch({ type: 'analyze', concept: concept.trim() })
+            dispatch({ type: 'analyze', concept: concept.trim(), controls })
           }}
         >
           <input
@@ -237,6 +305,16 @@ export default function App() {
           >
             Analyze
           </button>
+          <input
+            className="control-words"
+            aria-label="Control words (optional)"
+            placeholder="Controls (optional): dog, lion, tiger"
+            title="Exactly three comma-separated controls. Leave blank for automatic selection."
+            value={controlWords}
+            onChange={(e) => setControlWords(e.target.value)}
+            disabled={busy}
+            maxLength={130}
+          />
         </form>
         {report && (
           <section className="report" aria-label="Ablation results">
@@ -289,7 +367,22 @@ export default function App() {
               selected neurons pass the statistical checks; those checks do not
               restrict the mask. Slider changes take effect when you apply them.
             </p>
-            <p>Related controls: {report.controls.join(', ')}.</p>
+            {cacheInfo && (
+              <p className="status">
+                Analysis method v{cacheInfo.version} ·{' '}
+                {cacheInfo.hit
+                  ? 'Loaded from browser cache'
+                  : cacheInfo.savedAt
+                    ? 'Saved in browser cache'
+                    : 'Cache unavailable; results are not saved'}
+              </p>
+            )}
+            <p>
+              {report.controlSource === 'provided'
+                ? 'Your controls'
+                : 'Generated controls'}
+              : {report.controls.join(', ')}.
+            </p>
             <p className="status">
               {report.statistics.pairs} matched templates ·{' '}
               {report.statistics.tested.toLocaleString()} channels measured ·{' '}
@@ -355,9 +448,10 @@ export default function App() {
                 standardized effect ≥0.5. Related templates are not independent
                 random samples, so q-values are screening evidence, not proof.
                 Prompts name the concept; lexical effects remain a confound.
-                Generated controls may be semantically imperfect. Test threshold
-                compares original versus masked continuation loss on{' '}
-                {TEST_TEMPLATES.length} separate templates for the target and
+                Generated controls may be semantically imperfect. Optional
+                supplied controls are used exactly as entered, after trimming.
+                Test threshold compares original versus masked continuation loss
+                on {TEST_TEMPLATES.length} separate templates for the target and
                 three controls, then restores your previously applied mask.
                 Repeated threshold tests are exploratory, not an independent
                 confirmation of forgetting.
@@ -380,7 +474,9 @@ export default function App() {
                 </details>
               )}
               <p>
-                Control-generation response:{' '}
+                {report.controlSource === 'provided'
+                  ? 'Provided controls:'
+                  : 'Control-generation response:'}{' '}
                 <code>{report.controlGeneration}</code>
               </p>
               {report.probes.map((p, i) => (
@@ -481,7 +577,11 @@ export default function App() {
         </div>
       </section>
       <aside className="visualization-column" aria-label="Visualization">
-        <ActivationView frame={activationFrame} busy={busy} />
+        <ActivationView
+          frame={activationFrame}
+          disabled={disabledNeurons}
+          busy={busy}
+        />
       </aside>
     </main>
   )

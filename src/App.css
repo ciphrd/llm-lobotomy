@@ -331,3 +331,37 @@ button.clear {
 .report .actions {
   flex-wrap: wrap;
 }
+
+.concept {
+  flex-wrap: wrap;
+}
+.concept input.control-words {
+  flex-basis: 100%;
+  font-size: 13px;
+  border-top: 1px solid #eee;
+  padding-top: 10px;
+}
+
+.cached-analyses {
+  align-self: flex-start;
+  max-width: 100%;
+  margin-bottom: 10px;
+  padding: 5px 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #555;
+  font-size: 12px;
+}
+
+.masked-key {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff1f29;
+  flex-shrink: 0;
+}
+.activation-key {
+  flex-wrap: wrap;
+}

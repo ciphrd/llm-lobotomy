@@ -13,6 +13,14 @@ npm run dev
 
 Open the printed localhost URL. Send a message for normal chat, or enter a concept and select **Analyze**. First use downloads roughly 2.8 GB of ONNX model files, plus tokenizer/runtime assets. These are different from the previous WebLLM files. Browser caching is best-effort and requires available storage. A GPU with `shader-f16` support and substantial free GPU/system memory is required. Serve on HTTPS or localhost.
 
+## Analysis cache
+
+The optional Controls field accepts exactly three comma-separated words or short phrases, used verbatim after trimming instead of model-generated controls. Leave it blank for automatic selection. Duplicate controls and target/plural variants are rejected before model loading.
+
+Completed reports are saved locally in browser Cache Storage. Analyzing the same trimmed, case-sensitive term and control choice returns the stored report before model loading or profiling. The UI shows whether results were loaded, saved, or could not be saved. Threshold selection remains interactive; applying a mask, chat, and evaluation load the model when needed. Evaluation runs are not cached.
+
+Bump `ANALYSIS_METHOD_VERSION` in `src/inference/analysis-cache.ts` whenever profiling templates, control generation, activation collection, statistical calculations, or report schema change. On first worker use after an upgrade, all older analysis cache namespaces are deleted. Automatic controls and each explicitly supplied control list have separate entries. The key also includes model ID, pinned revision, and precision. Model download caches remain untouched. Storage denial/quota errors fall back to normal analysis; browser storage eviction can require recomputation. Cached reports from before this feature cannot be recovered automatically.
+
 ## Live 3D activations
 
 The WebGPU view draws one point for each of the 350,208 MLP channels in 36 layer planes. Real activation frames are transferred from the inference worker after every forward pass, during both chat and analysis. Drag to orbit, scroll or use +/− to zoom, and select a layer to isolate its channels and inspect their exact values. Brightness adjusts the fixed logarithmic color scale without changing measurements.
